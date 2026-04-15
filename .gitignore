@@ -1,0 +1,9 @@
+.env
+.env.local
+*.log
+*.pid
+__pycache__/
+*.pyc
+state/
+state-test/
+.DS_Store

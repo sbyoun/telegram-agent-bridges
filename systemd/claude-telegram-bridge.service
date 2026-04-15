@@ -1,0 +1,14 @@
+[Unit]
+Description=Claude Telegram Bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/telegram-agent-bridges/bridges/claude
+ExecStart=%h/telegram-agent-bridges/bridges/claude/run-bridge.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
