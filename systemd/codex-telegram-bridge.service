@@ -2,13 +2,15 @@
 Description=Codex Telegram Bridge
 After=network-online.target
 Wants=network-online.target
+ConditionPathExists=%h/dev/telegram-agent-bridges/bridges/codex/.env
 
 [Service]
 Type=simple
-WorkingDirectory=%h/telegram-agent-bridges/bridges/codex
-ExecStart=%h/telegram-agent-bridges/bridges/codex/run-bridge.sh
-Restart=always
-RestartSec=3
+WorkingDirectory=%h/dev/telegram-agent-bridges/bridges/codex
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/dev/telegram-agent-bridges/bridges/codex/run-bridge.sh
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=default.target

@@ -6,6 +6,7 @@ Use it when you want to keep a local Codex session reachable from Telegram witho
 
 ## Commands
 
+- `./run-bridge.sh` creates `./.venv` on first run and installs `requirements.txt`.
 - `/start`
 - `/help`
 - `/sessions`

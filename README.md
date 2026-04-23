@@ -33,6 +33,7 @@ The design stays deliberately simple:
 
 - provider-specific Python script
 - `.env` config
+- bridge-local `.venv` created by `run-bridge.sh`
 - optional `systemd --user` service
 - no abstraction layer beyond what is necessary
 
@@ -52,10 +53,8 @@ Example with Codex:
 ```bash
 cd bridges/codex
 cp .env.example .env
-set -a
-source .env
-set +a
-python3 bridge.py
+vi .env
+./run-bridge.sh
 ```
 
 Example with Claude:
@@ -63,11 +62,11 @@ Example with Claude:
 ```bash
 cd bridges/claude
 cp .env.example .env
-set -a
-source .env
-set +a
-python3 bridge.py
+vi .env
+./run-bridge.sh
 ```
+
+Each bridge creates its own `./.venv` on first run and installs the local `requirements.txt`.
 
 ## Session model
 
@@ -94,14 +93,30 @@ Claude titles follow the saved session metadata:
 
 ## systemd
 
-Example user services are included under `systemd/`.
+Example user services are included under `systemd/`. They assume the repository lives at
+`~/dev/telegram-agent-bridges`; edit `WorkingDirectory`, `ExecStart`, and
+`ConditionPathExists` if you clone it elsewhere.
+
+If you were running a bridge manually in `screen`, stop it before enabling systemd so
+Telegram does not see two `getUpdates` pollers for the same bot.
 
 ```bash
+screen -S codex_bridge -X quit 2>/dev/null || true
+screen -S claude_bridge -X quit 2>/dev/null || true
+
 mkdir -p ~/.config/systemd/user
 cp systemd/*.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now codex-telegram-bridge.service
 systemctl --user enable --now claude-telegram-bridge.service
+```
+
+Useful checks:
+
+```bash
+systemctl --user status codex-telegram-bridge.service
+journalctl --user -u codex-telegram-bridge.service -f
+tail -f ~/dev/telegram-agent-bridges/bridges/codex/bridge.log
 ```
 
 ## Security

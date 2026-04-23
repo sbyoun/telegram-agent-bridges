@@ -40,6 +40,10 @@ API_BASE = "https://api.telegram.org"
 MAX_MESSAGE_LEN = 4000
 
 
+class TelegramAPIError(RuntimeError):
+    """Telegram request failed without exposing the bot token in logs."""
+
+
 def env_flag(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -109,6 +113,17 @@ class TelegramClient:
         self.base_url = f"{API_BASE}/bot{config.bot_token}"
         self.session = requests.Session()
 
+    def _raise_for_status(self, action: str, response: requests.Response) -> None:
+        if response.ok:
+            return
+        description = response.text.strip()
+        try:
+            payload = response.json()
+            description = str(payload.get("description") or payload)
+        except ValueError:
+            pass
+        raise TelegramAPIError(f"{action} failed: HTTP {response.status_code}: {description}")
+
     def get_updates(self, offset: int | None) -> list[dict[str, Any]]:
         params: dict[str, Any] = {
             "timeout": self.config.poll_timeout,
@@ -121,7 +136,7 @@ class TelegramClient:
             params=params,
             timeout=(10, self.config.poll_timeout + 20),
         )
-        response.raise_for_status()
+        self._raise_for_status("getUpdates", response)
         payload = response.json()
         if not payload.get("ok"):
             raise RuntimeError(f"Telegram getUpdates failed: {payload}")
@@ -134,7 +149,7 @@ class TelegramClient:
                 json={"chat_id": chat_id, "text": chunk},
                 timeout=20,
             )
-            response.raise_for_status()
+            self._raise_for_status("sendMessage", response)
 
     def set_my_commands(self, commands: list[dict[str, str]], scope: dict[str, Any] | None = None) -> None:
         payload: dict[str, Any] = {"commands": commands}
@@ -145,7 +160,7 @@ class TelegramClient:
             json=payload,
             timeout=20,
         )
-        response.raise_for_status()
+        self._raise_for_status("setMyCommands", response)
 
     def delete_my_commands(self, scope: dict[str, Any] | None = None) -> None:
         payload: dict[str, Any] = {}
@@ -156,7 +171,7 @@ class TelegramClient:
             json=payload,
             timeout=20,
         )
-        response.raise_for_status()
+        self._raise_for_status("deleteMyCommands", response)
 
 
 class StateStore:
@@ -244,10 +259,16 @@ class CodexBridge:
 
     def sync_telegram_commands(self) -> None:
         commands = self.desired_commands()
-        self.telegram.set_my_commands(commands, {"type": "default"})
-        self.telegram.set_my_commands(commands, {"type": "all_private_chats"})
+        try:
+            self.telegram.set_my_commands(commands, {"type": "default"})
+            self.telegram.set_my_commands(commands, {"type": "all_private_chats"})
+        except TelegramAPIError as exc:
+            print(f"telegram command sync warning: {exc}", flush=True)
         for chat_id in self.config.allowed_chat_ids:
-            self.telegram.delete_my_commands({"type": "chat", "chat_id": int(chat_id)})
+            try:
+                self.telegram.delete_my_commands({"type": "chat", "chat_id": int(chat_id)})
+            except TelegramAPIError as exc:
+                print(f"telegram chat command cleanup warning for {chat_id}: {exc}", flush=True)
 
     def bridge_snapshot(self) -> dict[str, Any]:
         task = self.task
@@ -655,6 +676,9 @@ class CodexBridge:
             except requests.RequestException as exc:
                 time.sleep(2)
                 print(f"telegram request error: {exc}", flush=True)
+            except TelegramAPIError as exc:
+                time.sleep(2)
+                print(f"telegram api error: {exc}", flush=True)
             except Exception as exc:  # pragma: no cover - operational fallback
                 time.sleep(2)
                 print(f"bridge loop error: {exc}", flush=True)
