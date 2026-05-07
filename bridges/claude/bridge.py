@@ -213,6 +213,8 @@ class TaskState:
     session_mode: str = "new"
     assistant_messages: list[str] = field(default_factory=list)
     tail: deque[str] = field(default_factory=lambda: deque(maxlen=120))
+    result_received: bool = False
+    result_sent: bool = False
     done: bool = False
     returncode: int | None = None
     last_error: str | None = None
@@ -620,7 +622,9 @@ class ClaudeBridge:
                 self._consume_claude_line(task, line)
             task.returncode = task.process.wait()
             task.done = True
-            self.send(task.chat_id, self._finish_message(task))
+            if not task.result_sent:
+                self.send(task.chat_id, self._finish_message(task))
+                task.result_sent = True
         except Exception as exc:
             task.done = True
             task.last_error = str(exc)
@@ -648,9 +652,13 @@ class ClaudeBridge:
             if text:
                 task.assistant_messages.append(text)
         elif event_type == "result":
+            task.result_received = True
             result_text = (payload.get("result") or "").strip()
             if result_text and (not task.assistant_messages or task.assistant_messages[-1] != result_text):
                 task.assistant_messages.append(result_text)
+            if not task.result_sent:
+                self.send(task.chat_id, self._result_message(task, payload))
+                task.result_sent = True
 
     def _finish_message(self, task: TaskState) -> str:
         header = f"Claude task finished with exit code {task.returncode} in {task.duration()}s"
@@ -662,6 +670,15 @@ class ClaudeBridge:
         if task.returncode and tail:
             message += f"\n\nRecent output:\n{tail}"
         return message
+
+    def _result_message(self, task: TaskState, payload: dict[str, Any]) -> str:
+        subtype = str(payload.get("subtype") or "result")
+        is_error = bool(payload.get("is_error"))
+        body = "\n\n".join(task.assistant_messages[-3:]).strip()
+        if not body:
+            body = "(No assistant message captured. Use /tail for raw output.)"
+        status = "error" if is_error else subtype
+        return f"Claude task {status} in {task.duration()}s\n\n{body}"
 
     def status_text(self, chat_id: str) -> str:
         task = self.task
