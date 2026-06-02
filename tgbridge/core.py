@@ -356,15 +356,27 @@ class Bridge:
         page = int(raw_page)
         return page if page >= 1 else None
 
-    def sessions_keyboard(self, page: int, total_pages: int) -> dict[str, Any] | None:
-        if total_pages <= 1:
-            return None
-        row = []
+    def sessions_keyboard(self, sessions: list[SessionInfo], page: int, total_pages: int,
+                          anchor: str | None) -> dict[str, Any] | None:
+        rows: list[list[dict[str, Any]]] = []
+        for idx, s in enumerate(sessions, start=1):
+            label = s.name if (s.name and s.name != s.id) else s.id[:8]
+            text = ("⭐ " if s.id == anchor else "") + f"{idx}. {label}"
+            if len(text) > 40:
+                text = text[:39] + "…"
+            cb = f"use:{page}:{s.id}"
+            # callback_data hard limit is 64 bytes; fall back to index if too long
+            if len(cb.encode()) > 64:
+                cb = f"useidx:{page}:{idx}"
+            rows.append([{"text": text, "callback_data": cb}])
+        nav = []
         if page > 1:
-            row.append({"text": "Prev", "callback_data": f"sessions:{page - 1}"})
+            nav.append({"text": "◀ Prev", "callback_data": f"sessions:{page - 1}"})
         if page < total_pages:
-            row.append({"text": "Next", "callback_data": f"sessions:{page + 1}"})
-        return {"inline_keyboard": [row]} if row else None
+            nav.append({"text": "Next ▶", "callback_data": f"sessions:{page + 1}"})
+        if nav:
+            rows.append(nav)
+        return {"inline_keyboard": rows} if rows else None
 
     def show_sessions(self, chat_id: str, page: int = 1, page_size: int = SESSION_PAGE_SIZE,
                       message_id: int | None = None) -> None:
@@ -392,9 +404,9 @@ class Bridge:
                 f"   cwd: {session.cwd or '-'}\n"
                 f"   updated: {self.format_timestamp(session.updated_ms)}"
             )
-        lines.append("\nUse /sessions <page>, /session use <number>, or /session use <session_id>")
+        lines.append("\n아래 버튼을 눌러 세션을 바로 전환하세요. (⭐ = 현재 anchor)")
         text = "\n".join(lines)
-        keyboard = self.sessions_keyboard(page, total_pages)
+        keyboard = self.sessions_keyboard(sessions, page, total_pages, anchor)
         if message_id is not None:
             self.telegram.edit_message_text(chat_id, message_id, text, reply_markup=keyboard)
             return
@@ -488,19 +500,41 @@ class Bridge:
         chat_id = str(chat.get("id") or "")
         message_id = message.get("message_id")
         data = str(callback_query.get("data") or "")
-        if callback_id:
-            self.telegram.answer_callback_query(callback_id)
         if not chat_id or not self.is_allowed(chat_id):
+            if callback_id:
+                self.telegram.answer_callback_query(callback_id)
             return
-        if not data.startswith("sessions:"):
-            return
-        try:
-            page = int(data.split(":", 1)[1])
-        except ValueError:
-            return
-        if page < 1 or not isinstance(message_id, int):
-            return
-        self.show_sessions(chat_id, page=page, message_id=message_id)
+
+        toast: str | None = None
+        if data.startswith("use:") or data.startswith("useidx:"):
+            kind, _, rest = data.partition(":")
+            page_str, _, sel = rest.partition(":")
+            page = int(page_str) if page_str.isdigit() else 1
+            sid: str | None = None
+            if kind == "useidx":
+                idx = int(sel) if sel.isdigit() else 0
+                page_sessions = self.last_session_menu.get(chat_id) or []
+                if 1 <= idx <= len(page_sessions):
+                    sid = page_sessions[idx - 1].id
+            else:
+                sid = sel or None
+            if sid:
+                prev = self.current_anchor(chat_id)
+                self.set_anchor(chat_id, sid)
+                toast = f"✓ 세션 전환: {sid[:8]}"
+                if sid != prev and isinstance(message_id, int):
+                    self.show_sessions(chat_id, page=page, message_id=message_id)
+            else:
+                toast = "세션을 찾지 못했어요. /sessions 다시 열기"
+        elif data.startswith("sessions:"):
+            try:
+                page = int(data.split(":", 1)[1])
+            except ValueError:
+                page = 0
+            if page >= 1 and isinstance(message_id, int):
+                self.show_sessions(chat_id, page=page, message_id=message_id)
+        if callback_id:
+            self.telegram.answer_callback_query(callback_id, toast)
 
     def change_workdir(self, chat_id: str, requested: str) -> None:
         path = Path(requested).expanduser().resolve()
