@@ -9,7 +9,8 @@ Use it when you want Telegram access to local Claude sessions while keeping Clau
 - `./run-bridge.sh` creates `./.venv` on first run and installs `requirements.txt`.
 - `/start`
 - `/help`
-- `/sessions`
+- `/sessions [page]`
+- `/sessions` includes Prev/Next page buttons when more sessions are available.
 - `/session current`
 - `/session use <number|session_id>`
 - `/session new`

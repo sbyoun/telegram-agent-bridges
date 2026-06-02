@@ -74,7 +74,7 @@ Both bridges follow the same model:
 
 - a Telegram chat can be anchored to one local session
 - the next plain message resumes that session
-- `/sessions` shows recent local sessions
+- `/sessions` shows recent local sessions with page buttons, and `/sessions 2` opens a page directly
 - `/session use ...` switches the anchor
 - `/session new` clears the anchor
 

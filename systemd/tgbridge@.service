@@ -1,0 +1,16 @@
+[Unit]
+Description=Unified Telegram Bridge (%i)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=%h/telegram-agent-bridges/instances/%i/.env
+
+[Service]
+Type=simple
+WorkingDirectory=%h/telegram-agent-bridges
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/telegram-agent-bridges/run-tgbridge.sh %i
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
