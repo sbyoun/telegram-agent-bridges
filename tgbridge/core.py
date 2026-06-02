@@ -243,6 +243,7 @@ class Bridge:
         return [
             {"command": "start", "description": "Show chat id and setup status"},
             {"command": "help", "description": "Show available commands"},
+            {"command": "new", "description": "Start a fresh session"},
             {"command": "sessions", "description": f"List recent {d} sessions"},
             {"command": "session", "description": "Manage the anchored session"},
             {"command": "status", "description": "Show current task state"},
@@ -297,7 +298,8 @@ class Bridge:
         return (
             f"{d} Telegram bridge commands\n\n"
             f"/run <prompt> - run a {d} task\n"
-            f"/sessions [page] - list recent {d} sessions\n"
+            "/new [prompt] - start a fresh session (optionally run a prompt)\n"
+            f"/sessions [page] - list recent {d} sessions (tap to switch)\n"
             "/session current - show anchored session\n"
             "/session use <n|id> - anchor this chat to a session\n"
             "/session new - clear anchor so next message creates a fresh session\n"
@@ -344,7 +346,10 @@ class Bridge:
 
     # ---- sessions listing / pagination ----
     def load_recent_sessions(self, limit: int | None = SESSION_PAGE_SIZE) -> list[SessionInfo]:
-        return self.provider.list_sessions(limit=limit)
+        # core guarantees most-recently-used first regardless of provider
+        sessions = self.provider.list_sessions(limit=None)
+        sessions.sort(key=lambda s: s.updated_ms, reverse=True)
+        return sessions if limit is None else sessions[:limit]
 
     def parse_sessions_page(self, text: str) -> int | None:
         parts = text.split(maxsplit=1)
@@ -472,9 +477,12 @@ class Bridge:
             self.send(chat_id, "Usage: /session current | /session use <n|id> | /session new"); return
         if text == "/session current":
             self.send(chat_id, self.format_anchor_text(chat_id)); return
-        if text == "/session new":
+        if text == "/session new" or text == "/new":
             self.set_anchor(chat_id, None)
-            self.send(chat_id, f"Cleared anchored session. The next message will create and anchor a new {self.display} session."); return
+            self.send(chat_id, f"🆕 새 세션 모드. 다음 메시지가 새 {self.display} 세션이 됩니다."); return
+        if text.startswith("/new "):
+            self.set_anchor(chat_id, None)
+            self.start_task(chat_id, text[len("/new "):].strip()); return
         if text.startswith("/session use "):
             self.use_session(chat_id, text[len("/session use "):].strip()); return
         if text == "/status":
