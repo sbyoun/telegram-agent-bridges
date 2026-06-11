@@ -1,0 +1,16 @@
+[Unit]
+Description=Telegram Relay MCP
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=%h/telegram-agent-bridges/mcp/telegram/.env
+
+[Service]
+Type=simple
+WorkingDirectory=%h/telegram-agent-bridges/mcp/telegram
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/telegram-agent-bridges/mcp/telegram/run.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
