@@ -116,6 +116,20 @@ class PendingAsk:
 
 
 @dataclass
+class PendingApproval:
+    """A button-based approval bound to exactly one Telegram message.
+
+    Resolved by an inline-keyboard callback (chosen option string) or by a
+    native text reply to the approval message (free-form text). Self-contained
+    per message, so many agents can have approvals in flight on one channel.
+    """
+
+    message_id: int
+    options: list[str]
+    future: "asyncio.Future[str]"
+
+
+@dataclass
 class Relay:
     cfg: Config
     client: httpx.AsyncClient
@@ -125,8 +139,11 @@ class Relay:
     pending_order: deque[int] = field(default_factory=deque)
     # unmatched human messages, kept bounded
     inbox: deque[Incoming] = field(default_factory=lambda: deque(maxlen=500))
+    # approval_id -> PendingApproval (inline-keyboard approvals)
+    approvals: dict[int, PendingApproval] = field(default_factory=dict)
     offset: int | None = None
     _ask_seq: int = 0
+    _appr_seq: int = 0
 
     @property
     def base_url(self) -> str:
@@ -134,17 +151,27 @@ class Relay:
 
     # ----- outgoing ------------------------------------------------------- #
     async def send_message(
-        self, text: str, reply_to: int | None = None
+        self,
+        text: str,
+        reply_to: int | None = None,
+        reply_markup: dict[str, Any] | None = None,
     ) -> int | None:
-        """Send (chunked) and return the message_id of the first chunk."""
+        """Send (chunked) and return the message_id of the first chunk.
+
+        reply_markup (inline keyboard) is attached to the last chunk so the
+        buttons always sit directly under the visible end of the message.
+        """
         first_id: int | None = None
-        for i, chunk in enumerate(chunk_text(text)):
+        chunks = chunk_text(text)
+        for i, chunk in enumerate(chunks):
             payload: dict[str, Any] = {
                 "chat_id": self.cfg.target_chat_id,
                 "text": chunk,
             }
             if reply_to is not None and i == 0:
                 payload["reply_to_message_id"] = reply_to
+            if reply_markup is not None and i == len(chunks) - 1:
+                payload["reply_markup"] = reply_markup
             resp = await self.client.post(
                 f"{self.base_url}/sendMessage", json=payload, timeout=30
             )
@@ -174,8 +201,34 @@ class Relay:
         except ValueError:
             pass
 
+    # ----- approval lifecycle --------------------------------------------- #
+    async def finalize_approval_message(
+        self, message_id: int, original_text: str, outcome: str
+    ) -> None:
+        """Edit the approval message in place: stamp outcome, drop keyboard."""
+        try:
+            resp = await self.client.post(
+                f"{self.base_url}/editMessageText",
+                json={
+                    "chat_id": self.cfg.target_chat_id,
+                    "message_id": message_id,
+                    "text": f"{original_text}\n\n{outcome}",
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+        except Exception as exc:  # cosmetic only — never break resolution
+            print(f"[approve] edit failed: {exc}", file=sys.stderr, flush=True)
+
     def _route(self, msg: Incoming) -> bool:
         """Try to deliver an incoming message to a pending ask. Return matched."""
+        # 0. native reply to a pending approval message -> free-form answer
+        if msg.reply_to is not None:
+            for appr in list(self.approvals.values()):
+                if appr.message_id == msg.reply_to:
+                    if not appr.future.done():
+                        appr.future.set_result(msg.text)
+                    return True
         # 1. exact reply match
         if msg.reply_to is not None:
             for ask_id, ask in list(self.pending.items()):
@@ -219,6 +272,10 @@ class Relay:
                 await asyncio.sleep(2)
 
     def _handle_update(self, update: dict[str, Any]) -> None:
+        callback = update.get("callback_query")
+        if callback:
+            asyncio.get_running_loop().create_task(self._handle_callback(callback))
+            return
         message = update.get("message") or update.get("channel_post")
         if not message:
             return
@@ -240,6 +297,41 @@ class Relay:
         )
         if not self._route(msg):
             self.inbox.append(msg)
+
+    async def _handle_callback(self, callback: dict[str, Any]) -> None:
+        """Resolve an inline-keyboard press: appr:<approval_id>:<option_index>."""
+        cb_id = callback.get("id", "")
+        try:
+            message = callback.get("message") or {}
+            chat_id = str(message.get("chat", {}).get("id", ""))
+            data = callback.get("data", "") or ""
+            ack_text = ""
+            if chat_id in self.cfg.allowed_chat_ids and data.startswith("appr:"):
+                try:
+                    _, appr_str, idx_str = data.split(":", 2)
+                    appr = self.approvals.get(int(appr_str))
+                    idx = int(idx_str)
+                except (ValueError, TypeError):
+                    appr, idx = None, -1
+                if appr and 0 <= idx < len(appr.options):
+                    chosen = appr.options[idx]
+                    if not appr.future.done():
+                        appr.future.set_result(chosen)
+                    ack_text = chosen
+                    who = (callback.get("from") or {}).get("first_name", "")
+                    await self.finalize_approval_message(
+                        int(message.get("message_id", appr.message_id)),
+                        message.get("text", ""),
+                        f"☑️ 선택: {chosen}" + (f" — {who}" if who else ""),
+                    )
+            # always answer the callback so the client stops the spinner
+            await self.client.post(
+                f"{self.base_url}/answerCallbackQuery",
+                json={"callback_query_id": cb_id, "text": ack_text},
+                timeout=30,
+            )
+        except Exception as exc:  # keep the poll loop healthy
+            print(f"[callback] error: {exc}", file=sys.stderr, flush=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -309,6 +401,56 @@ async def telegram_ask(question: str, timeout_seconds: int = 600) -> str:
             fut.cancel()
         return f"timeout: no reply within {timeout_seconds}s (question_id={mid})"
     return reply.text
+
+
+@mcp.tool()
+async def telegram_approve(
+    question: str,
+    options: list[str] | None = None,
+    timeout_seconds: int = 600,
+) -> str:
+    """Send an approval request with inline buttons and block until decided.
+
+    Each request is self-contained in one Telegram message: the buttons carry
+    this request's id, so many agents can have approvals pending on the same
+    channel without ambiguity. The human either presses a button (returns that
+    option string, e.g. "승인") or replies to the message with free-form text
+    (returns that text — useful for "수정해서 ~로 해줘" style answers). On
+    decision the message is edited in place to record the outcome and the
+    keyboard is removed. Returns "timeout: ..." if nobody decides in time.
+
+    options defaults to ["승인", "거부"]. Keep each option short (button label).
+    """
+    r = relay()
+    opts = [o.strip() for o in (options or ["승인", "거부"]) if o and o.strip()]
+    if not opts:
+        return "error: options must contain at least one non-empty label"
+    # Reserve the id first so callback_data can embed it.
+    r._appr_seq += 1
+    appr_id = r._appr_seq
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": opt, "callback_data": f"appr:{appr_id}:{i}"}]
+            for i, opt in enumerate(opts)
+        ]
+    }
+    mid = await r.send_message(question, reply_markup=keyboard)
+    if mid is None:
+        return "error: failed to send approval request"
+    loop = asyncio.get_running_loop()
+    fut: "asyncio.Future[str]" = loop.create_future()
+    r.approvals[appr_id] = PendingApproval(mid, opts, fut)
+    fut.add_done_callback(lambda _f, aid=appr_id: r.approvals.pop(aid, None))
+    try:
+        decision = await asyncio.wait_for(fut, timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        if not fut.done():
+            fut.cancel()
+        await r.finalize_approval_message(
+            mid, question, f"⌛ 시간 초과({timeout_seconds}s) — 미결정"
+        )
+        return f"timeout: no decision within {timeout_seconds}s (message_id={mid})"
+    return decision
 
 
 @mcp.tool()

@@ -96,3 +96,9 @@ systemctl --user enable --now telegram-relay-mcp.service
 - Restrict `TELEGRAM_ALLOWED_CHAT_IDS` to your own account/channel.
 - The MCP endpoint binds to `127.0.0.1` by default — do not expose it publicly
   without putting authentication in front of it.
+
+### telegram_approve (inline buttons)
+
+| Tool | Behaviour |
+| --- | --- |
+| `telegram_approve(question, options=["승인","거부"], timeout_seconds=600)` | Send an approval request with inline buttons; **block until a button is pressed or the message gets a text reply**. Self-contained per message (`callback_data` carries the request id), so many agents can have approvals in flight on one channel. On decision the message is edited in place (outcome stamped, keyboard removed). |
