@@ -264,6 +264,13 @@ class Relay:
                     continue
                 for update in data.get("result", []):
                     self.offset = int(update["update_id"]) + 1
+                    kinds = [k for k in update.keys() if k != "update_id"]
+                    print(
+                        f"[update] id={update['update_id']} kinds={kinds} "
+                        f"data={ (update.get('callback_query') or {}).get('data', '-') }",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                     self._handle_update(update)
             except httpx.HTTPStatusError as exc:
                 # 409 = another getUpdates poller is using this bot token.
