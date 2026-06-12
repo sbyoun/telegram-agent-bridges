@@ -364,21 +364,27 @@ def relay() -> Relay:
 
 @asynccontextmanager
 async def lifespan(_server: FastMCP):
+    # Streamable-HTTP runs this once per client session, but the relay must be
+    # a process-wide singleton: extra Relay+poller pairs fight over getUpdates
+    # (409) and swallow callbacks meant for another instance's approvals.
     global _relay
+    if _relay is not None:
+        yield
+        return
     cfg = Config.load()
-    async with httpx.AsyncClient() as client:
-        _relay = Relay(cfg=cfg, client=client)
-        poller = asyncio.create_task(_relay.poll_forever())
-        print(
-            f"[relay] polling chat(s) {sorted(cfg.allowed_chat_ids)} -> "
-            f"target {cfg.target_chat_id}",
-            file=sys.stderr,
-            flush=True,
-        )
-        try:
-            yield
-        finally:
-            poller.cancel()
+    # No await between the guard above and the assignment below, so concurrent
+    # session startups cannot both pass the None check.
+    _relay = Relay(cfg=cfg, client=httpx.AsyncClient())
+    asyncio.create_task(_relay.poll_forever())
+    print(
+        f"[relay] polling chat(s) {sorted(cfg.allowed_chat_ids)} -> "
+        f"target {cfg.target_chat_id}",
+        file=sys.stderr,
+        flush=True,
+    )
+    # The poller and client live for the whole process: a session closing must
+    # not tear down the shared poll loop.
+    yield
 
 
 mcp = FastMCP("telegram-relay", lifespan=lifespan)
@@ -486,6 +492,7 @@ async def telegram_check(since_message_id: int = 0) -> str:
 
 
 def main() -> None:
+    print("[main] telegram-relay starting", file=sys.stderr, flush=True)
     cfg = Config.load()  # validate early; fail fast with a clear message
     mcp.settings.host = cfg.host
     mcp.settings.port = cfg.port
