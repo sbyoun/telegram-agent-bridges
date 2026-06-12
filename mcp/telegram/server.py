@@ -265,6 +265,15 @@ class Relay:
                 for update in data.get("result", []):
                     self.offset = int(update["update_id"]) + 1
                     self._handle_update(update)
+            except httpx.HTTPStatusError as exc:
+                # 409 = another getUpdates poller is using this bot token.
+                print(
+                    f"[poll] HTTP {exc.response.status_code}: "
+                    f"{exc.response.text[:200]}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                await asyncio.sleep(2)
             except (httpx.HTTPError, asyncio.TimeoutError):
                 await asyncio.sleep(2)
             except Exception as exc:  # keep the loop alive
