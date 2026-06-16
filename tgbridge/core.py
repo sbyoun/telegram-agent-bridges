@@ -590,6 +590,16 @@ class Bridge:
                     task.tail.append(line)
                 self._consume_line(task, line)
             task.returncode = task.process.wait()
+            final = self.provider.finalize(task)
+            if final is not None:
+                if final.session_id:
+                    task.session_id = final.session_id
+                    self.set_anchor(task.chat_id, final.session_id)
+                if final.assistant_text and (
+                    not task.assistant_messages
+                    or task.assistant_messages[-1] != final.assistant_text
+                ):
+                    task.assistant_messages.append(final.assistant_text)
             task.done = True
             if not task.result_sent:
                 self.send(task.chat_id, self._finish_message(task))

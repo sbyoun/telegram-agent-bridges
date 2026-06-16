@@ -56,6 +56,16 @@ class Provider:
         """Parse one stdout line. Pure: no side effects. Return None to ignore."""
         return None
 
+    def finalize(self, task) -> "LineEvent | None":
+        """Called once after stdout closes, before the finish message is sent.
+
+        Lets a provider that buffers plain-text output (no terminal "result"
+        event) flush the whole response and/or capture a session id at the end.
+        Default: no-op. The core applies the returned event's session_id and
+        assistant_text just like a consumed line.
+        """
+        return None
+
     def list_sessions(self, limit: int | None = None) -> list[SessionInfo]:
         return []
 
@@ -71,4 +81,9 @@ def get_provider(name: str) -> Provider:
     if name == "gemini":
         from .gemini import GeminiProvider
         return GeminiProvider()
-    raise SystemExit(f"Unknown BRIDGE_PROVIDER: {name!r} (expected claude|codex|gemini)")
+    if name in {"antigravity", "agy"}:
+        from .antigravity import AntigravityProvider
+        return AntigravityProvider()
+    raise SystemExit(
+        f"Unknown BRIDGE_PROVIDER: {name!r} (expected claude|codex|gemini|antigravity)"
+    )
