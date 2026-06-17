@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from .base import Command, LineEvent, Provider, SessionInfo
+from .base import Command, LineEvent, Provider, SessionInfo, excluded_cwds, is_excluded
 
 
 def _iso_to_ms(value) -> int:
@@ -68,18 +68,24 @@ class CodexProvider(Provider):
         # file mtime = last activity; the legacy session_index.jsonl is stale.
         base = Path.home() / ".codex" / "sessions"
         if base.exists():
+            excluded = excluded_cwds(self.env_prefix)
             files = list(base.glob("**/rollout-*.jsonl"))
             files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
             cap = 60 if limit is None else max(limit, 8)
             sessions: list[SessionInfo] = []
-            for path in files[:cap]:
+            for path in files:
+                if len(sessions) >= cap:
+                    break
                 sid = self._id_from_rollout_name(path.name)
                 if not sid:
+                    continue
+                cwd = self._cwd_from_rollout(path)
+                if is_excluded(cwd, excluded):
                     continue
                 sessions.append(SessionInfo(
                     id=sid,
                     name=self._title_from_rollout(path),
-                    cwd="",
+                    cwd=cwd,
                     updated_ms=int(path.stat().st_mtime * 1000),
                 ))
             return sessions
@@ -119,6 +125,32 @@ class CodexProvider(Provider):
         parts = stem.split("-")
         if len(parts) >= 5:  # last 5 groups form the UUID (8-4-4-4-12)
             return "-".join(parts[-5:])
+        return ""
+
+    @staticmethod
+    def _cwd_from_rollout(path: Path) -> str:
+        """Read the session cwd from the rollout's session_meta header (line 0).
+
+        Cheap: cwd lives in the first few events, so excluded loop-engine
+        sessions are skipped before the more expensive title scan runs.
+        """
+        try:
+            with path.open() as fh:
+                for i, line in enumerate(fh):
+                    if i > 8:
+                        break
+                    line = line.strip()
+                    if not line.startswith("{"):
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    pl = ev.get("payload") or {}
+                    if isinstance(pl, dict) and pl.get("cwd"):
+                        return str(pl.get("cwd"))
+        except OSError:
+            pass
         return ""
 
     @staticmethod

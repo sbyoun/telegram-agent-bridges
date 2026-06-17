@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from .base import Command, LineEvent, Provider, SessionInfo
+from .base import Command, LineEvent, Provider, SessionInfo, excluded_cwds, is_excluded
 
 
 def _iso_to_ms(value) -> int:
@@ -73,6 +73,7 @@ class ClaudeProvider(Provider):
 
     def list_sessions(self, limit: int | None = None) -> list[SessionInfo]:
         merged: dict[str, SessionInfo] = {}
+        excluded = excluded_cwds(self.env_prefix)
 
         sessions_dir = Path.home() / ".claude" / "sessions"
         if sessions_dir.exists():
@@ -83,6 +84,8 @@ class ClaudeProvider(Provider):
                     continue
                 session_id = str(payload.get("sessionId") or "").strip()
                 if not session_id:
+                    continue
+                if is_excluded(str(payload.get("cwd") or ""), excluded):
                     continue
                 started_at = int(payload.get("startedAt") or 0)
                 merged[session_id] = SessionInfo(
@@ -104,6 +107,7 @@ class ClaudeProvider(Provider):
                 cwd = ""
                 started_at = 0
                 updated_at = int(path.stat().st_mtime * 1000)
+                skip = False
                 try:
                     with path.open() as fh:
                         for line in fh:
@@ -119,6 +123,11 @@ class ClaudeProvider(Provider):
                                 session_id = event_session_id
                             if not cwd and event.get("cwd"):
                                 cwd = str(event.get("cwd"))
+                                # Bail out early on automated-loop dirs so we
+                                # don't fully parse hundreds of jsonl files.
+                                if is_excluded(cwd, excluded):
+                                    skip = True
+                                    break
                             ts_ms = _iso_to_ms(event.get("timestamp"))
                             if ts_ms:
                                 if not started_at:
@@ -132,6 +141,9 @@ class ClaudeProvider(Provider):
                                 if ai_title:
                                     name = ai_title
                 except OSError:
+                    continue
+
+                if skip:
                     continue
 
                 existing = merged.get(session_id)
