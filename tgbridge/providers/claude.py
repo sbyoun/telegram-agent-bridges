@@ -104,6 +104,8 @@ class ClaudeProvider(Provider):
                 if not session_id or session_id.startswith("agent-"):
                     continue
                 name = path.stem
+                custom_title = ""
+                ai_title = ""
                 cwd = ""
                 started_at = 0
                 updated_at = int(path.stat().st_mtime * 1000)
@@ -133,18 +135,24 @@ class ClaudeProvider(Provider):
                                 if not started_at:
                                     started_at = ts_ms
                                 updated_at = max(updated_at, ts_ms)
-                            custom_title = str(event.get("customTitle") or "").strip()
-                            if custom_title:
-                                name = custom_title
+                            ct = str(event.get("customTitle") or "").strip()
+                            if ct:
+                                custom_title = ct
                             else:
-                                ai_title = str(event.get("aiTitle") or event.get("aiTitleText") or "").strip()
-                                if ai_title:
-                                    name = ai_title
+                                at = str(event.get("aiTitle") or event.get("aiTitleText") or "").strip()
+                                if at:
+                                    ai_title = at
                 except OSError:
                     continue
 
                 if skip:
                     continue
+
+                # A user's manual rename (customTitle) always wins over the
+                # AI-generated title, regardless of which event appears last:
+                # ai-title events are re-emitted on every session load and would
+                # otherwise clobber the rename.
+                name = custom_title or ai_title or name
 
                 existing = merged.get(session_id)
                 if existing:
