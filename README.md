@@ -81,6 +81,14 @@ Every provider follows the same model:
 - `/session use ...` switches the anchor
 - `/session new` clears the anchor
 
+Automated/headless sessions can be hidden from `/sessions` via
+`<PREFIX>_EXCLUDE_CWDS` (e.g. `CLAUDE_EXCLUDE_CWDS`, `CODEX_EXCLUDE_CWDS`), a
+comma-separated list of cwd prefixes. It **defaults to `/home/ubuntu/loop-engine`**,
+so on hosts where loop-engine (or any noisy headless driver) lives elsewhere you
+must point it at the real path, e.g.
+`CLAUDE_EXCLUDE_CWDS=/ext_hdd/workspace/you/loop-engine`. Set it to empty to
+disable filtering. Excluded sessions stay on disk and remain resumable.
+
 Provider-specific session sources:
 
 - Codex: `~/.codex/session_index.jsonl` (current rollout store)
@@ -121,6 +129,19 @@ unit at `systemd/telegram-relay-mcp.service`.
 
 If you previously ran a bridge in `screen`, stop it before enabling systemd so
 Telegram does not see two `getUpdates` pollers for the same bot.
+
+## Troubleshooting
+
+- **`/sessions` buttons do nothing when tapped** — inline-button taps arrive as
+  `callback_query` updates, which Telegram only delivers if `allowed_updates` is
+  sent to `getUpdates` as a JSON-encoded array. Passing a Python list to
+  `requests` serializes it as repeated keys
+  (`allowed_updates=message&allowed_updates=callback_query`), which Telegram
+  ignores — so messages work but button taps are silently dropped. Fixed by
+  JSON-encoding the value; make sure you are running a build that includes it.
+- **`/sessions` is flooded with headless/loop sessions** — set
+  `<PREFIX>_EXCLUDE_CWDS` (see [Session model](#session-model)); the default only
+  matches `/home/ubuntu/loop-engine`.
 
 ## Security
 

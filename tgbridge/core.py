@@ -116,7 +116,9 @@ class TelegramClient:
     def get_updates(self, offset: int | None) -> list[dict[str, Any]]:
         params: dict[str, Any] = {
             "timeout": self.config.poll_timeout,
-            "allowed_updates": ["message", "callback_query"],
+            # Telegram expects a JSON-encoded array; requests would otherwise
+            # serialize a Python list as repeated keys, which drops callback_query.
+            "allowed_updates": json.dumps(["message", "callback_query"]),
         }
         if offset is not None:
             params["offset"] = offset
@@ -508,6 +510,7 @@ class Bridge:
         chat_id = str(chat.get("id") or "")
         message_id = message.get("message_id")
         data = str(callback_query.get("data") or "")
+        print(f"[{self.provider.name}] callback from {chat_id}: {data!r}", flush=True)
         if not chat_id or not self.is_allowed(chat_id):
             if callback_id:
                 self.telegram.answer_callback_query(callback_id)
