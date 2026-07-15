@@ -25,6 +25,9 @@ class CodexProvider(Provider):
 
     def build_command(self, cfg, prompt, workdir, session_id) -> Command:
         if session_id:
+            # `codex exec resume` accepts no -C/--cd flag; the resumed turn
+            # inherits the process cwd, which the core sets via Popen(cwd=
+            # workdir), so /cd still applies to resumed sessions.
             argv = [cfg.cli_bin, "exec", "resume", "--skip-git-repo-check", "--json"]
             if cfg.model:
                 argv.extend(["--model", cfg.model])

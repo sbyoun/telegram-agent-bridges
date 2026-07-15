@@ -55,8 +55,10 @@ class AntigravityProvider(Provider):
             argv.extend(["--conversation", session_id])
         elif session_id == RESUME_SENTINEL:
             argv.append("--continue")
-        # autonomous bridge: never block on an interactive permission prompt
-        argv.append("--dangerously-skip-permissions")
+        # Off by default; opt in via ANTIGRAVITY_BYPASS_PERMISSIONS=1 so a
+        # non-interactive --print run never blocks on a permission prompt.
+        if cfg.bypass_permissions:
+            argv.append("--dangerously-skip-permissions")
         argv.extend(cfg.extra_args)
         # --print is a value flag and must take the prompt as its value, last.
         argv.extend(["--print", prompt])
