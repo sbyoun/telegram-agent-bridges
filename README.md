@@ -100,10 +100,15 @@ Provider-specific session sources:
 ## MCP: agent -> Telegram
 
 `mcp/telegram/` is the inverse direction. A single long-running MCP daemon owns
-one Telegram bot and exposes three tools to any connected agent:
+one Telegram bot and exposes four tools to any connected agent:
 
 - `telegram_notify(message)` — one-way update
 - `telegram_ask(question, timeout)` — ask and block until a human replies
+- `telegram_approve(question, options, timeout)` — ask with inline buttons and
+  block until one is tapped (or the message gets a text reply). Each request id
+  travels in the button's `callback_data`, so routing is complete per message —
+  this is the tool to reach for when several agents share one channel, where
+  `telegram_ask`'s fallback routing would force native replies
 - `telegram_check(since_id)` — non-blocking drain of new messages
 
 It shares the same `TELEGRAM_BOT_TOKEN` / `TELEGRAM_ALLOWED_CHAT_IDS`
@@ -147,4 +152,13 @@ Telegram does not see two `getUpdates` pollers for the same bot.
 
 - Intended for private, self-hosted use
 - Restrict `TELEGRAM_ALLOWED_CHAT_IDS` to your own account
-- Review provider CLI permission flags before unattended use
+- Senders are checked too: `TELEGRAM_ALLOWED_USER_IDS` defaults to the chat
+  allowlist (private chat: user id == chat id). If the allowed chat is a
+  group, set it explicitly or no member will be able to run commands
+- Permission bypass is opt-in: by default the bridge runs each CLI in its
+  normal permission mode, which in a headless run means the agent is
+  effectively read-only. Set `<PREFIX>_BYPASS_PERMISSIONS=1` (e.g.
+  `CLAUDE_BYPASS_PERMISSIONS=1`) to restore autonomous writes — only on a
+  private, allowlisted chat
+- `BRIDGE_CD_ROOTS` (comma-separated) restricts where `/cd` may point;
+  unset means unrestricted

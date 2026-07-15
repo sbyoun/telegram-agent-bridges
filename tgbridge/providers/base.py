@@ -9,22 +9,14 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-# cwd prefixes whose sessions are hidden from /sessions even with no env set.
-# loop-engine spawns hundreds of headless agent loops there; they bury the
-# interactive sessions and are never resumed from Telegram.
-DEFAULT_EXCLUDED_CWDS = ("/home/ubuntu/loop-engine",)
-
-
 def excluded_cwds(env_prefix: str) -> tuple[str, ...]:
     """cwd prefixes to hide from a provider's session list.
 
-    Configurable via ``<PREFIX>_EXCLUDE_CWDS`` (comma-separated absolute paths).
-    When the env var is unset, the loop-engine default applies; set it to an
-    empty string to disable filtering entirely.
+    Configurable via ``<PREFIX>_EXCLUDE_CWDS`` (comma-separated absolute
+    paths). No filtering by default — useful when a directory hosts hundreds
+    of headless agent loops that would bury the interactive sessions.
     """
-    raw = os.getenv(f"{env_prefix}_EXCLUDE_CWDS")
-    if raw is None:
-        return DEFAULT_EXCLUDED_CWDS
+    raw = os.getenv(f"{env_prefix}_EXCLUDE_CWDS", "")
     return tuple(p.strip().rstrip("/") for p in raw.split(",") if p.strip())
 
 

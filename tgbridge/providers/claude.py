@@ -30,10 +30,16 @@ class ClaudeProvider(Provider):
             "--verbose",
             "--output-format",
             "stream-json",
-            "--permission-mode",
-            "bypassPermissions",
-            "--dangerously-skip-permissions",
         ]
+        # Off by default: headless -p runs cannot answer permission prompts,
+        # so without bypass the agent is effectively read-only. Opt in via
+        # CLAUDE_BYPASS_PERMISSIONS=1 once the chat/user allowlists are set.
+        if cfg.bypass_permissions:
+            argv.extend([
+                "--permission-mode",
+                "bypassPermissions",
+                "--dangerously-skip-permissions",
+            ])
         if cfg.model:
             argv.extend(["--model", cfg.model])
         argv.extend(cfg.extra_args)
