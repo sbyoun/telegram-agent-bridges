@@ -342,12 +342,18 @@ class Bridge:
 
     # ---- session labels ----
     @staticmethod
+    def has_title(session: SessionInfo) -> bool:
+        name = (session.name or "").strip()
+        return bool(name and name != session.id)
+
+    @staticmethod
     def session_label(session: SessionInfo, width: int = 38) -> tuple[str, bool]:
         """(라벨, 실제_제목_여부). 제목이 있는 세션은 대다수가 아니므로
         없으면 첫 프롬프트 → 작업 디렉토리 순으로 대체해 목록에서 구분되게 한다."""
         name = (session.name or "").strip()
         if name and name != session.id:
             return (name[:width], True)
+        # 아래는 제목이 없는 세션 — 목록에서 뒤로 밀리고 접두사가 붙는다
         prompt = (getattr(session, "first_prompt", "") or "").strip()
         if prompt:
             return (prompt[:width], False)
@@ -366,9 +372,11 @@ class Bridge:
 
     # ---- sessions listing / pagination ----
     def load_recent_sessions(self, limit: int | None = SESSION_PAGE_SIZE) -> list[SessionInfo]:
-        # core guarantees most-recently-used first regardless of provider
+        # core guarantees ordering regardless of provider:
+        # 이름을 직접 지정한 세션이 먼저(찾으려는 건 대개 이쪽), 그 안에서 최근순.
+        # 제목 없는 세션은 뒤로 밀되 역시 최근순을 유지한다.
         sessions = self.provider.list_sessions(limit=None)
-        sessions.sort(key=lambda s: s.updated_ms, reverse=True)
+        sessions.sort(key=lambda s: (0 if self.has_title(s) else 1, -s.updated_ms))
         return sessions if limit is None else sessions[:limit]
 
     def parse_sessions_page(self, text: str) -> int | None:
