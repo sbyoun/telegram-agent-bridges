@@ -17,6 +17,35 @@ def _iso_to_ms(value) -> int:
         return 0
 
 
+_PROMPT_SKIP_PREFIXES = (
+    "<", "Caveat:", "This session is being continued", "[Request interrupted",
+)
+
+
+def _first_prompt_text(event: dict) -> str:
+    """첫 사용자 프롬프트를 목록 라벨용으로 뽑는다.
+
+    시스템 리마인더/명령 출력/이어하기 안내 등 기계가 넣은 텍스트는 제외해야
+    라벨이 쓸모 있다. (세션 1,626개 중 제목이 있는 건 13개뿐이라 이 폴백이 사실상 주 라벨)
+    """
+    if event.get("type") != "user" or event.get("isMeta"):
+        return ""
+    message = event.get("message") or {}
+    content = message.get("content")
+    if isinstance(content, list):
+        text = " ".join(
+            block.get("text", "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    else:
+        text = str(content or "")
+    text = " ".join(text.split())
+    if not text or text.startswith(_PROMPT_SKIP_PREFIXES):
+        return ""
+    return text
+
+
 class ClaudeProvider(Provider):
     name = "claude"
     display = "Claude"
@@ -69,6 +98,9 @@ class ClaudeProvider(Provider):
             result_text = (payload.get("result") or "").strip()
             if result_text:
                 ev.assistant_text = result_text
+            errors = payload.get("errors") or []
+            if any("No conversation found with session ID" in str(error) for error in errors):
+                ev.clear_anchor = True
         return ev
 
     def list_sessions(self, limit: int | None = None) -> list[SessionInfo]:
@@ -104,6 +136,7 @@ class ClaudeProvider(Provider):
                 if not session_id or session_id.startswith("agent-"):
                     continue
                 name = path.stem
+                first_prompt = ""
                 cwd = ""
                 started_at = 0
                 updated_at = int(path.stat().st_mtime * 1000)
@@ -133,6 +166,8 @@ class ClaudeProvider(Provider):
                                 if not started_at:
                                     started_at = ts_ms
                                 updated_at = max(updated_at, ts_ms)
+                            if not first_prompt:
+                                first_prompt = _first_prompt_text(event)[:120]
                             custom_title = str(event.get("customTitle") or "").strip()
                             if custom_title:
                                 name = custom_title
@@ -153,12 +188,14 @@ class ClaudeProvider(Provider):
                         name=name if name != path.stem else existing.name,
                         cwd=cwd or existing.cwd,
                         updated_ms=max(existing.updated_ms, updated_at, started_at),
+                        first_prompt=first_prompt or existing.first_prompt,
                     )
                 else:
                     merged[session_id] = SessionInfo(
                         id=session_id,
                         name=name,
                         cwd=cwd,
+                        first_prompt=first_prompt,
                         updated_ms=updated_at or started_at,
                     )
 

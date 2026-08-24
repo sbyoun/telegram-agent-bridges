@@ -42,6 +42,9 @@ class SessionInfo:
     name: str = ""
     cwd: str = ""
     updated_ms: int = 0
+    # 제목(customTitle/aiTitle)이 없는 세션이 대다수라, 목록에서 구분되도록
+    # 첫 사용자 프롬프트를 폴백 라벨로 쓴다. 없으면 빈 문자열.
+    first_prompt: str = ""
 
 
 @dataclass
@@ -67,6 +70,7 @@ class LineEvent:
     is_result: bool = False             # a terminal "result" event (send now)
     result_subtype: str | None = None
     is_error: bool = False
+    clear_anchor: bool = False          # provider rejected the anchored session
 
 
 class Provider:

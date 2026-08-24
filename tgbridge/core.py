@@ -339,6 +339,26 @@ class Bridge:
             return f"No anchored session. Next message will start a new {self.display} session."
         return f"Anchored session: {anchor}"
 
+
+    # ---- session labels ----
+    @staticmethod
+    def session_label(session: SessionInfo, width: int = 38) -> tuple[str, bool]:
+        """(라벨, 실제_제목_여부). 제목이 있는 세션은 대다수가 아니므로
+        없으면 첫 프롬프트 → 작업 디렉토리 순으로 대체해 목록에서 구분되게 한다."""
+        name = (session.name or "").strip()
+        if name and name != session.id:
+            return (name[:width], True)
+        prompt = (getattr(session, "first_prompt", "") or "").strip()
+        if prompt:
+            return (prompt[:width], False)
+        cwd = (session.cwd or "").rstrip("/")
+        home = str(Path.home()).rstrip("/")
+        if cwd and cwd != home:
+            # 홈 디렉토리는 대다수 세션이 공유해 구분에 쓸모가 없다 — 하위 경로만 라벨로.
+            rel = cwd[len(home) + 1:] if cwd.startswith(home + "/") else cwd
+            return (f"{rel}/", False)
+        return (session.id[:8], False)
+
     def format_timestamp(self, raw_ms: int) -> str:
         if not raw_ms:
             return "-"
@@ -365,8 +385,9 @@ class Bridge:
                           anchor: str | None) -> dict[str, Any] | None:
         rows: list[list[dict[str, Any]]] = []
         for idx, s in enumerate(sessions, start=1):
-            label = s.name if (s.name and s.name != s.id) else s.id[:8]
-            text = ("⭐ " if s.id == anchor else "") + f"{idx}. {label}"
+            label, titled = self.session_label(s, width=34)
+            mark = "" if titled else "· "   # 제목 없는 세션은 점으로 구분
+            text = ("⭐ " if s.id == anchor else "") + f"{idx}. {mark}{label}"
             if len(text) > 40:
                 text = text[:39] + "…"
             cb = f"use:{page}:{s.id}"
@@ -402,9 +423,10 @@ class Bridge:
         lines = [f"Recent {self.display} sessions (page {page}/{total_pages}, {total} total)\n"]
         for idx, session in enumerate(sessions, start=1):
             marker = " [anchored]" if session.id == anchor else ""
-            label = session.name if session.name and session.name != session.id else "(none)"
+            label, titled = self.session_label(session, width=60)
+            prefix = "" if titled else "(제목없음) "
             lines.append(
-                f"{idx}. {label}{marker}\n"
+                f"{idx}. {prefix}{label}{marker}\n"
                 f"   id: {session.id}\n"
                 f"   cwd: {session.cwd or '-'}\n"
                 f"   updated: {self.format_timestamp(session.updated_ms)}"
@@ -618,6 +640,8 @@ class Bridge:
         if ev.session_id:
             task.session_id = ev.session_id
             self.set_anchor(task.chat_id, ev.session_id)
+        if ev.clear_anchor:
+            self.set_anchor(task.chat_id, None)
         if ev.assistant_text:
             if not task.assistant_messages or task.assistant_messages[-1] != ev.assistant_text:
                 task.assistant_messages.append(ev.assistant_text)
