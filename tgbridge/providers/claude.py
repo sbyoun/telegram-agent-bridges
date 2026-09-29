@@ -232,8 +232,7 @@ class ClaudeProvider(Provider):
                 continue
             custom = rec.get("custom_title") or ""
             ai = rec.get("ai_title") or ""
-            if not custom and not ai:
-                continue     # 제목 없는 세션은 목록에 올리지 않는다
+            # 제목 없는 세션도 넘긴다(name=""). 숨길지는 core 규칙이 정한다.
             info = SessionInfo(
                 id=rec["session_id"],
                 name=custom or ai,

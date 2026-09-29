@@ -183,4 +183,4 @@ class CodexProvider(Provider):
                                 return t[:40]
         except OSError:
             pass
-        return "(codex)"
+        return ""   # 제목 없음 — core 가 목록에서 숨긴다
