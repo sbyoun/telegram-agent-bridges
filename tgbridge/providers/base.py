@@ -43,10 +43,8 @@ class SessionInfo:
     name: str = ""
     cwd: str = ""
     updated_ms: int = 0
-    # 제목(customTitle/aiTitle)이 없는 세션이 대다수라, 목록에서 구분되도록
-    # 첫 사용자 프롬프트를 폴백 라벨로 쓴다. 없으면 빈 문자열.
-    first_prompt: str = ""
-    # 사용자가 직접 붙인 제목(/rename)인지. 자동 제목(aiTitle)보다 앞에 정렬한다.
+    # name 이 사용자가 직접 붙인 제목인지(자동 요약이 아닌지). core 는 제목 없는
+    # 세션을 숨기고, 직접 붙인 제목 → 자동 제목 순으로 정렬한다.
     custom_title: bool = False
 
 

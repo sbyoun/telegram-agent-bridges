@@ -372,23 +372,8 @@ class Bridge:
         return bool(name and name != session.id)
 
     @staticmethod
-    def session_label(session: SessionInfo, width: int = 38) -> tuple[str, bool]:
-        """(라벨, 실제_제목_여부). 제목이 있는 세션은 대다수가 아니므로
-        없으면 첫 프롬프트 → 작업 디렉토리 순으로 대체해 목록에서 구분되게 한다."""
-        name = (session.name or "").strip()
-        if name and name != session.id:
-            return (name[:width], True)
-        # 아래는 제목이 없는 세션 — 목록에서 뒤로 밀리고 접두사가 붙는다
-        prompt = (getattr(session, "first_prompt", "") or "").strip()
-        if prompt:
-            return (prompt[:width], False)
-        cwd = (session.cwd or "").rstrip("/")
-        home = str(Path.home()).rstrip("/")
-        if cwd and cwd != home:
-            # 홈 디렉토리는 대다수 세션이 공유해 구분에 쓸모가 없다 — 하위 경로만 라벨로.
-            rel = cwd[len(home) + 1:] if cwd.startswith(home + "/") else cwd
-            return (f"{rel}/", False)
-        return (session.id[:8], False)
+    def session_label(session: SessionInfo, width: int = 38) -> str:
+        return (session.name or "").strip()[:width]
 
     def format_timestamp(self, raw_ms: int) -> str:
         if not raw_ms:
@@ -397,12 +382,12 @@ class Bridge:
 
     # ---- sessions listing / pagination ----
     def load_recent_sessions(self, limit: int | None = SESSION_PAGE_SIZE) -> list[SessionInfo]:
-        # core guarantees ordering regardless of provider:
-        # 사용자가 직접 이름 붙인 세션 → 자동 제목 세션 → 제목 없는 세션 순,
-        # 각 그룹 안에서는 최근 사용순.
-        sessions = self.provider.list_sessions(limit=None)
-        sessions.sort(key=lambda s: (
-            0 if s.custom_title else (1 if self.has_title(s) else 2), -s.updated_ms))
+        # 목록 규칙은 프로바이더와 무관하게 core가 정한다. 어댑터는 세션의
+        # 이름과 그것이 직접 붙인 이름인지만 넘긴다.
+        #   - 제목 없는 세션(자동 생성·배치 실행)은 목록에 올리지 않는다
+        #   - 직접 이름 붙인 세션 → 자동 제목 세션, 각 그룹 안에서 최근 사용순
+        sessions = [s for s in self.provider.list_sessions(limit=None) if self.has_title(s)]
+        sessions.sort(key=lambda s: (0 if s.custom_title else 1, -s.updated_ms))
         return sessions if limit is None else sessions[:limit]
 
     def parse_sessions_page(self, text: str) -> int | None:
@@ -419,9 +404,8 @@ class Bridge:
                           anchor: str | None) -> dict[str, Any] | None:
         rows: list[list[dict[str, Any]]] = []
         for idx, s in enumerate(sessions, start=1):
-            label, titled = self.session_label(s, width=34)
-            mark = "" if titled else "· "   # 제목 없는 세션은 점으로 구분
-            text = ("⭐ " if s.id == anchor else "") + f"{idx}. {mark}{label}"
+            label = self.session_label(s, width=34)
+            text = ("⭐ " if s.id == anchor else "") + f"{idx}. {label}"
             if len(text) > 40:
                 text = text[:39] + "…"
             cb = f"use:{page}:{s.id}"
@@ -457,10 +441,9 @@ class Bridge:
         lines = [f"Recent {self.display} sessions (page {page}/{total_pages}, {total} total)\n"]
         for idx, session in enumerate(sessions, start=1):
             marker = " [anchored]" if session.id == anchor else ""
-            label, titled = self.session_label(session, width=60)
-            prefix = "" if titled else "(제목없음) "
+            label = self.session_label(session, width=60)
             lines.append(
-                f"{idx}. {prefix}{label}{marker}\n"
+                f"{idx}. {label}{marker}\n"
                 f"   id: {session.id}\n"
                 f"   cwd: {session.cwd or '-'}\n"
                 f"   updated: {self.format_timestamp(session.updated_ms)}"

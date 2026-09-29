@@ -29,11 +29,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .base import Command, LineEvent, Provider, SessionInfo
+from .base import Command, LineEvent, Provider, SessionInfo, excluded_cwds, is_excluded
 
 RESUME_SENTINEL = "latest"
 AGY_HOME = Path.home() / ".gemini" / "antigravity-cli"
-HISTORY = AGY_HOME / "history.jsonl"
 CONVERSATIONS = AGY_HOME / "conversations"
 
 
@@ -97,42 +96,51 @@ class AntigravityProvider(Provider):
         return newest.stem or None
 
     def list_sessions(self, limit: int | None = None) -> list[SessionInfo]:
-        # conversations/<uuid>.db (mtime = last activity) is the source of truth;
-        # enrich titles from history.jsonl where an interactive prompt exists.
+        # conversations/<uuid>.db (mtime = last activity) is the source of truth.
+        # Title and workspace come from conversation_summaries.db. agy has no
+        # rename command, so every title is an auto summary (custom_title=False);
+        # the core decides what to hide and how to sort.
         try:
             dbs = list(CONVERSATIONS.glob("*.db"))
         except OSError:
             return []
-        titles = self._history_titles()
-        sessions = [
-            SessionInfo(
-                id=p.stem,
-                name=titles.get(p.stem, "(agy)"),
-                cwd="",
-                updated_ms=int(p.stat().st_mtime * 1000),
-            )
-            for p in dbs
-        ]
+        meta = self._summaries()
+        excluded = excluded_cwds(self.env_prefix)
+        sessions: list[SessionInfo] = []
+        for p in dbs:
+            title, cwd = meta.get(p.stem, ("", ""))
+            if is_excluded(cwd, excluded):
+                continue
+            try:
+                updated_ms = int(p.stat().st_mtime * 1000)
+            except OSError:
+                continue
+            sessions.append(SessionInfo(id=p.stem, name=title, cwd=cwd, updated_ms=updated_ms))
         sessions.sort(key=lambda s: s.updated_ms, reverse=True)
         return sessions if limit is None else sessions[:limit]
 
     @staticmethod
-    def _history_titles() -> dict[str, str]:
-        titles: dict[str, str] = {}
+    def _summaries() -> dict[str, tuple[str, str]]:
+        """conversation_id -> (title, cwd) from conversation_summaries.db."""
+        out: dict[str, tuple[str, str]] = {}
+        db_path = AGY_HOME / "conversation_summaries.db"
+        if not db_path.exists():
+            return out
         try:
-            with HISTORY.open() as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        e = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    cid = str(e.get("conversationId") or "").strip()
-                    disp = str(e.get("display") or "").strip()
-                    if cid and disp:
-                        titles[cid] = disp[:40]  # last prompt wins
-        except OSError:
-            pass
-        return titles
+            import sqlite3
+            with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+                rows = conn.execute(
+                    "SELECT conversation_id, title, workspace_uris FROM conversation_summaries"
+                ).fetchall()
+        except Exception:
+            return out
+        for cid, title, uris in rows:
+            cwd = ""
+            try:
+                first = (json.loads(uris or "[]") or [""])[0]
+            except (json.JSONDecodeError, TypeError, IndexError):
+                first = ""
+            if isinstance(first, str) and first.startswith("file://"):
+                cwd = first[len("file://"):]
+            out[str(cid)] = (str(title or "").strip(), cwd)
+        return out
