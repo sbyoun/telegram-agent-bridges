@@ -373,10 +373,11 @@ class Bridge:
     # ---- sessions listing / pagination ----
     def load_recent_sessions(self, limit: int | None = SESSION_PAGE_SIZE) -> list[SessionInfo]:
         # core guarantees ordering regardless of provider:
-        # 이름을 직접 지정한 세션이 먼저(찾으려는 건 대개 이쪽), 그 안에서 최근순.
-        # 제목 없는 세션은 뒤로 밀되 역시 최근순을 유지한다.
+        # 사용자가 직접 이름 붙인 세션 → 자동 제목 세션 → 제목 없는 세션 순,
+        # 각 그룹 안에서는 최근 사용순.
         sessions = self.provider.list_sessions(limit=None)
-        sessions.sort(key=lambda s: (0 if self.has_title(s) else 1, -s.updated_ms))
+        sessions.sort(key=lambda s: (
+            0 if s.custom_title else (1 if self.has_title(s) else 2), -s.updated_ms))
         return sessions if limit is None else sessions[:limit]
 
     def parse_sessions_page(self, text: str) -> int | None:

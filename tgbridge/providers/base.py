@@ -10,9 +10,10 @@ import os
 from dataclasses import dataclass
 
 # cwd prefixes whose sessions are hidden from /sessions even with no env set.
-# loop-engine spawns hundreds of headless agent loops there; they bury the
-# interactive sessions and are never resumed from Telegram.
-DEFAULT_EXCLUDED_CWDS = ("/home/ubuntu/loop-engine",)
+# loop-engine spawns hundreds of headless agent loops there, and batch callers
+# (yousinsa agy calls etc.) run under /tmp; both bury the interactive sessions
+# and are never resumed from Telegram.
+DEFAULT_EXCLUDED_CWDS = ("/home/ubuntu/loop-engine", "/tmp")
 
 
 def excluded_cwds(env_prefix: str) -> tuple[str, ...]:
@@ -45,6 +46,8 @@ class SessionInfo:
     # 제목(customTitle/aiTitle)이 없는 세션이 대다수라, 목록에서 구분되도록
     # 첫 사용자 프롬프트를 폴백 라벨로 쓴다. 없으면 빈 문자열.
     first_prompt: str = ""
+    # 사용자가 직접 붙인 제목(/rename)인지. 자동 제목(aiTitle)보다 앞에 정렬한다.
+    custom_title: bool = False
 
 
 @dataclass
