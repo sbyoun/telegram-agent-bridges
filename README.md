@@ -81,6 +81,14 @@ Every provider follows the same model:
 - `/session use ...` switches the anchor
 - `/session new` clears the anchor
 
+Automated/headless sessions can be hidden from `/sessions` via
+`<PREFIX>_EXCLUDE_CWDS` (e.g. `CLAUDE_EXCLUDE_CWDS`, `CODEX_EXCLUDE_CWDS`), a
+comma-separated list of cwd prefixes. It **defaults to `/home/ubuntu/loop-engine`**,
+so on hosts where loop-engine (or any noisy headless driver) lives elsewhere you
+must point it at the real path, e.g.
+`CLAUDE_EXCLUDE_CWDS=/ext_hdd/workspace/you/loop-engine`. Set it to empty to
+disable filtering. Excluded sessions stay on disk and remain resumable.
+
 Provider-specific session sources:
 
 - Codex: `~/.codex/session_index.jsonl` (current rollout store)
@@ -92,10 +100,15 @@ Provider-specific session sources:
 ## MCP: agent -> Telegram
 
 `mcp/telegram/` is the inverse direction. A single long-running MCP daemon owns
-one Telegram bot and exposes three tools to any connected agent:
+one Telegram bot and exposes four tools to any connected agent:
 
 - `telegram_notify(message)` — one-way update
 - `telegram_ask(question, timeout)` — ask and block until a human replies
+- `telegram_approve(question, options, timeout)` — ask with inline buttons and
+  block until one is tapped (or the message gets a text reply). Each request id
+  travels in the button's `callback_data`, so routing is complete per message —
+  this is the tool to reach for when several agents share one channel, where
+  `telegram_ask`'s fallback routing would force native replies
 - `telegram_check(since_id)` — non-blocking drain of new messages
 
 It shares the same `TELEGRAM_BOT_TOKEN` / `TELEGRAM_ALLOWED_CHAT_IDS`
@@ -122,8 +135,30 @@ unit at `systemd/telegram-relay-mcp.service`.
 If you previously ran a bridge in `screen`, stop it before enabling systemd so
 Telegram does not see two `getUpdates` pollers for the same bot.
 
+## Troubleshooting
+
+- **`/sessions` buttons do nothing when tapped** — inline-button taps arrive as
+  `callback_query` updates, which Telegram only delivers if `allowed_updates` is
+  sent to `getUpdates` as a JSON-encoded array. Passing a Python list to
+  `requests` serializes it as repeated keys
+  (`allowed_updates=message&allowed_updates=callback_query`), which Telegram
+  ignores — so messages work but button taps are silently dropped. Fixed by
+  JSON-encoding the value; make sure you are running a build that includes it.
+- **`/sessions` is flooded with headless/loop sessions** — set
+  `<PREFIX>_EXCLUDE_CWDS` (see [Session model](#session-model)); the default only
+  matches `/home/ubuntu/loop-engine`.
+
 ## Security
 
 - Intended for private, self-hosted use
 - Restrict `TELEGRAM_ALLOWED_CHAT_IDS` to your own account
-- Review provider CLI permission flags before unattended use
+- Senders are checked too: `TELEGRAM_ALLOWED_USER_IDS` defaults to the chat
+  allowlist (private chat: user id == chat id). If the allowed chat is a
+  group, set it explicitly or no member will be able to run commands
+- Permission bypass is opt-in: by default the bridge runs each CLI in its
+  normal permission mode, which in a headless run means the agent is
+  effectively read-only. Set `<PREFIX>_BYPASS_PERMISSIONS=1` (e.g.
+  `CLAUDE_BYPASS_PERMISSIONS=1`) to restore autonomous writes — only on a
+  private, allowlisted chat
+- `BRIDGE_CD_ROOTS` (comma-separated) restricts where `/cd` may point;
+  unset means unrestricted

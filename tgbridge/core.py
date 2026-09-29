@@ -61,11 +61,14 @@ class BridgeConfig:
     bot_token: str
     allowed_chat_ids: set[str]
     cli_bin: str
+    allowed_user_ids: set[str] = field(default_factory=set)
     workdir: str = "/home/ubuntu"
     model: str | None = None
     extra_args: list[str] = field(default_factory=list)
     poll_timeout: int = 3
     plain_text_as_run: bool = False
+    bypass_permissions: bool = False
+    cd_roots: tuple[str, ...] = ()
     state_dir: Path = Path("./state")
 
     @classmethod
@@ -80,18 +83,35 @@ class BridgeConfig:
             raise SystemExit("TELEGRAM_BOT_TOKEN is required")
         if not allowed:
             raise SystemExit("TELEGRAM_ALLOWED_CHAT_IDS is required")
+        # Senders allowed to drive the bridge. Defaults to the chat allowlist:
+        # in a private chat the user id equals the chat id, so existing setups
+        # keep working. Group chats must list the actual user ids explicitly,
+        # otherwise every group member would effectively hold a remote shell.
+        allowed_users = {
+            item.strip()
+            for item in os.getenv("TELEGRAM_ALLOWED_USER_IDS", "").split(",")
+            if item.strip()
+        } or set(allowed)
         pre = provider.env_prefix
+        cd_roots = tuple(
+            str(Path(item.strip()).expanduser().resolve())
+            for item in os.getenv("BRIDGE_CD_ROOTS", "").split(",")
+            if item.strip()
+        )
         state_dir = Path(os.getenv("BRIDGE_STATE_DIR", "./state")).expanduser().resolve()
         state_dir.mkdir(parents=True, exist_ok=True)
         return cls(
             bot_token=token,
             allowed_chat_ids=allowed,
+            allowed_user_ids=allowed_users,
             cli_bin=os.getenv(f"{pre}_BIN", provider.default_bin).strip() or provider.default_bin,
             workdir=os.getenv(f"{pre}_WORKDIR", "/home/ubuntu").strip() or "/home/ubuntu",
             model=os.getenv(f"{pre}_MODEL", "").strip() or None,
             extra_args=shlex.split(os.getenv(f"{pre}_EXTRA_ARGS", "").strip()),
             poll_timeout=int(os.getenv("TELEGRAM_POLL_TIMEOUT", "3")),
             plain_text_as_run=env_flag("TELEGRAM_PLAIN_TEXT_AS_RUN", False),
+            bypass_permissions=env_flag(f"{pre}_BYPASS_PERMISSIONS", False),
+            cd_roots=cd_roots,
             state_dir=state_dir,
         )
 
@@ -116,7 +136,9 @@ class TelegramClient:
     def get_updates(self, offset: int | None) -> list[dict[str, Any]]:
         params: dict[str, Any] = {
             "timeout": self.config.poll_timeout,
-            "allowed_updates": ["message", "callback_query"],
+            # Telegram expects a JSON-encoded array; requests would otherwise
+            # serialize a Python list as repeated keys, which drops callback_query.
+            "allowed_updates": json.dumps(["message", "callback_query"]),
         }
         if offset is not None:
             params["offset"] = offset
@@ -289,6 +311,9 @@ class Bridge:
 
     def is_allowed(self, chat_id: str) -> bool:
         return chat_id in self.config.allowed_chat_ids
+
+    def is_sender_allowed(self, user_id: str) -> bool:
+        return bool(user_id) and user_id in self.config.allowed_user_ids
 
     def send(self, chat_id: str, text: str) -> None:
         self.telegram.send_message(chat_id, text)
@@ -479,10 +504,11 @@ class Bridge:
     # ---- message dispatch ----
     def handle_message(self, message: dict[str, Any]) -> None:
         chat_id = str(message["chat"]["id"])
+        user_id = str((message.get("from") or {}).get("id") or "")
         text = (message.get("text") or "").strip()
         if not text:
             return
-        print(f"[{self.provider.name}] recv from {chat_id}: {text[:120]}", flush=True)
+        print(f"[{self.provider.name}] recv from {chat_id} (user {user_id or '?'}): {text[:120]}", flush=True)
         if text == "/start":
             self.send(chat_id, self.start_text(chat_id))
             return
@@ -493,6 +519,18 @@ class Bridge:
                 f"Your chat id is: {chat_id}\n"
                 "Add it to TELEGRAM_ALLOWED_CHAT_IDS in the bridge .env, restart the bridge, then send /start again.",
             )
+            return
+        if not self.is_sender_allowed(user_id):
+            # In a group chat the chat allowlist alone would let every member
+            # drive the agent. Answer only explicit commands (so the owner can
+            # discover the id to allowlist) and ignore plain chatter silently.
+            if text.startswith("/"):
+                self.send(
+                    chat_id,
+                    "This user is not allowlisted.\n\n"
+                    f"Your user id is: {user_id or '(unknown)'}\n"
+                    "Add it to TELEGRAM_ALLOWED_USER_IDS in the bridge .env and restart the bridge.",
+                )
             return
         if not text.startswith("/") and self.config.plain_text_as_run:
             text = f"/run {text}"
@@ -537,11 +575,17 @@ class Bridge:
         message = callback_query.get("message") or {}
         chat = message.get("chat") or {}
         chat_id = str(chat.get("id") or "")
+        user_id = str((callback_query.get("from") or {}).get("id") or "")
         message_id = message.get("message_id")
         data = str(callback_query.get("data") or "")
+        print(f"[{self.provider.name}] callback from {chat_id}: {data!r}", flush=True)
         if not chat_id or not self.is_allowed(chat_id):
             if callback_id:
                 self.telegram.answer_callback_query(callback_id)
+            return
+        if not self.is_sender_allowed(user_id):
+            if callback_id:
+                self.telegram.answer_callback_query(callback_id, "권한이 없는 사용자입니다.")
             return
 
         toast: str | None = None
@@ -575,10 +619,19 @@ class Bridge:
         if callback_id:
             self.telegram.answer_callback_query(callback_id, toast)
 
+    def is_cd_allowed(self, path: Path) -> bool:
+        if not self.config.cd_roots:
+            return True
+        target = str(path)
+        return any(target == root or target.startswith(root + "/") for root in self.config.cd_roots)
+
     def change_workdir(self, chat_id: str, requested: str) -> None:
         path = Path(requested).expanduser().resolve()
         if not path.exists() or not path.is_dir():
             self.send(chat_id, f"Not a directory: {path}"); return
+        if not self.is_cd_allowed(path):
+            roots = ", ".join(self.config.cd_roots)
+            self.send(chat_id, f"Not allowed: {path}\nBRIDGE_CD_ROOTS restricts /cd to: {roots}"); return
         self.current_workdir = str(path)
         self.store.save_bridge_state(self.bridge_snapshot())
         self.send(chat_id, f"Default workdir updated to {self.current_workdir}")

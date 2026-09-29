@@ -48,10 +48,16 @@ class ClaudeProvider(Provider):
             "--verbose",
             "--output-format",
             "stream-json",
-            "--permission-mode",
-            "bypassPermissions",
-            "--dangerously-skip-permissions",
         ]
+        # Off by default: headless -p runs cannot answer permission prompts,
+        # so without bypass the agent is effectively read-only. Opt in via
+        # CLAUDE_BYPASS_PERMISSIONS=1 once the chat/user allowlists are set.
+        if cfg.bypass_permissions:
+            argv.extend([
+                "--permission-mode",
+                "bypassPermissions",
+                "--dangerously-skip-permissions",
+            ])
         if cfg.model:
             argv.extend(["--model", cfg.model])
         argv.extend(cfg.extra_args)
@@ -163,8 +169,12 @@ class ClaudeProvider(Provider):
 
     def _refresh_index(self) -> dict:
         index = self._load_index()
-        files: dict = index["files"]
         excluded = excluded_cwds(self.env_prefix)
+        if index.get("excluded_cwds") != list(excluded):
+            # 제외 설정이 바뀌면 excluded 플래그가 낡으므로 통째로 다시 만든다
+            index["excluded_cwds"] = list(excluded)
+            index["files"] = {}
+        files: dict = index["files"]
         projects_dir = Path.home() / ".claude" / "projects"
         seen: set[str] = set()
         dirty = False
