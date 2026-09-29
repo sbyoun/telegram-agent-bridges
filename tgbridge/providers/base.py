@@ -9,14 +9,23 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+# cwd prefixes hidden from /sessions when <PREFIX>_EXCLUDE_CWDS is unset.
+# /tmp is where batch callers spawn throwaway headless sessions (thousands of
+# them); they bury the interactive sessions and are never resumed from Telegram.
+DEFAULT_EXCLUDED_CWDS = ("/tmp",)
+
+
 def excluded_cwds(env_prefix: str) -> tuple[str, ...]:
     """cwd prefixes to hide from a provider's session list.
 
     Configurable via ``<PREFIX>_EXCLUDE_CWDS`` (comma-separated absolute
-    paths). No filtering by default — useful when a directory hosts hundreds
-    of headless agent loops that would bury the interactive sessions.
+    paths); setting it replaces the default (/tmp), and an empty string
+    disables filtering. Useful when a directory hosts hundreds of headless
+    agent loops that would bury the interactive sessions.
     """
-    raw = os.getenv(f"{env_prefix}_EXCLUDE_CWDS", "")
+    raw = os.getenv(f"{env_prefix}_EXCLUDE_CWDS")
+    if raw is None:
+        return DEFAULT_EXCLUDED_CWDS
     return tuple(p.strip().rstrip("/") for p in raw.split(",") if p.strip())
 
 
@@ -34,6 +43,11 @@ class SessionInfo:
     name: str = ""
     cwd: str = ""
     updated_ms: int = 0
+    # 제목(customTitle/aiTitle)이 없는 세션이 대다수라, 목록에서 구분되도록
+    # 첫 사용자 프롬프트를 폴백 라벨로 쓴다. 없으면 빈 문자열.
+    first_prompt: str = ""
+    # 사용자가 직접 붙인 제목(/rename)인지. 자동 제목(aiTitle)보다 앞에 정렬한다.
+    custom_title: bool = False
 
 
 @dataclass
@@ -59,6 +73,7 @@ class LineEvent:
     is_result: bool = False             # a terminal "result" event (send now)
     result_subtype: str | None = None
     is_error: bool = False
+    clear_anchor: bool = False          # provider rejected the anchored session
 
 
 class Provider:
