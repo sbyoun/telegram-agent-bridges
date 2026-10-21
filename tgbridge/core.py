@@ -204,11 +204,27 @@ class StateStore:
         data = json.loads(self.offset_file.read_text())
         return int(data.get("offset")) if data.get("offset") is not None else None
 
+    @staticmethod
+    def _write(path: Path, text: str) -> None:
+        """임시 파일에 쓰고 바꿔치기한다. 디스크가 차서 실패해도 기존 파일은
+        그대로 두고(잘리지 않음), 예외를 올리지 않는다. 상태 저장 실패가
+        작업 감시나 메시지 처리를 멈추게 해서는 안 된다."""
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            tmp.write_text(text)
+            os.replace(tmp, path)
+        except OSError as exc:
+            print(f"state write failed ({path.name}): {exc}", flush=True)
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
     def save_offset(self, offset: int) -> None:
-        self.offset_file.write_text(json.dumps({"offset": offset}, indent=2))
+        self._write(self.offset_file, json.dumps({"offset": offset}, indent=2))
 
     def save_bridge_state(self, data: dict[str, Any]) -> None:
-        self.bridge_file.write_text(json.dumps(data, indent=2, ensure_ascii=True))
+        self._write(self.bridge_file, json.dumps(data, indent=2, ensure_ascii=True))
 
     def load_bridge_state(self) -> dict[str, Any]:
         if not self.bridge_file.exists():
@@ -232,7 +248,10 @@ class TaskState:
     assistant_messages: list[str] = field(default_factory=list)
     tail: deque = field(default_factory=lambda: deque(maxlen=120))
     result_received: bool = False
-    result_sent: bool = False
+    result_count: int = 0           # 받은 result 이벤트 수 (턴이 끝날 때마다 1개)
+    sent_count: int = 0             # assistant_messages 중 텔레그램에 보낸 개수
+    waiting_background: bool = False  # 턴은 끝났지만 백그라운드 작업으로 프로세스가 살아 있음
+    stopped: bool = False           # /stop 으로 끝냄 — 이후 결과 알림 생략
     done: bool = False
     returncode: int | None = None
     last_error: str | None = None
@@ -250,6 +269,9 @@ class Bridge:
         self.current_workdir = config.workdir
         self.task_lock = threading.Lock()
         self.task: TaskState | None = None
+        # 작업이 도는 중에 온 메시지. CLI 프로세스에 끼워 넣을 수 없으므로
+        # 프로세스가 끝나면 같은 세션에서 이어서 실행한다. (chat_id, prompt)
+        self.pending: list[tuple[str, str]] = []
         self.shutdown = False
         state = self.store.load_bridge_state()
         self.anchored_sessions: dict[str, str] = dict(state.get("anchored_sessions") or {})
@@ -303,6 +325,7 @@ class Bridge:
                 "session_id": task.session_id,
                 "session_mode": task.session_mode,
                 "done": task.done,
+                "waiting_background": task.waiting_background,
                 "returncode": task.returncode,
                 "last_error": task.last_error,
                 "tail_size": len(task.tail),
@@ -317,6 +340,13 @@ class Bridge:
 
     def send(self, chat_id: str, text: str) -> None:
         self.telegram.send_message(chat_id, text)
+
+    def safe_send(self, chat_id: str, text: str) -> None:
+        """감시 스레드용: 전송 실패가 출력 읽기를 멈추게 하지 않는다."""
+        try:
+            self.send(chat_id, text)
+        except Exception as exc:
+            print(f"send failed: {exc}", flush=True)
 
     def help_text(self) -> str:
         d = self.display
@@ -626,7 +656,15 @@ class Bridge:
             self.send(chat_id, "Prompt is empty."); return
         with self.task_lock:
             if self.task and not self.task.done:
-                self.send(chat_id, "A task is already running. Use /status, /tail, or /stop first."); return
+                self.pending.append((chat_id, prompt))
+                what = "백그라운드 작업" if self.task.waiting_background else "지금 작업"
+                n = sum(1 for c, _ in self.pending if c == chat_id)
+                self.send(
+                    chat_id,
+                    f"⏳ {what}이 끝나면 같은 세션에서 이어서 실행합니다. (대기 {n}건)\n"
+                    "/status 로 상태 확인, /stop 하면 대기열도 비웁니다.",
+                )
+                return
             anchor = self.current_anchor(chat_id)
             cmd: Command = self.provider.build_command(self.config, prompt, self.current_workdir, anchor)
             process = subprocess.Popen(
@@ -649,14 +687,33 @@ class Bridge:
         self.send(chat_id, f"Started {self.display} task in {self.current_workdir}{session_line}\n\nPrompt: {short_prompt}")
 
     def _watch_task(self, task: TaskState) -> None:
+        """CLI 출력을 끝까지 읽고 프로세스를 회수한다.
+
+        claude -p 는 턴이 끝날 때마다 result 이벤트를 내는데, 백그라운드 작업이
+        남아 있으면 프로세스가 살아 있다가 완료 알림을 받고 다음 턴을 이어간다.
+        그래서 result 는 여러 번 올 수 있고, 진짜 끝은 프로세스 종료다.
+        어떤 오류가 나도 읽기를 멈추면 안 된다(출력 유실·파이프 막힘·좀비).
+        """
         try:
             assert task.process.stdout is not None
             for raw_line in task.process.stdout:
                 line = raw_line.rstrip("\n")
                 if line:
                     task.tail.append(line)
-                self._consume_line(task, line)
+                try:
+                    self._consume_line(task, line)
+                except Exception as exc:
+                    print(f"consume error: {exc}", flush=True)
+        except Exception as exc:
+            task.last_error = str(exc)
+            print(f"watch error: {exc}", flush=True)
+            if task.process.poll() is None:
+                task.process.kill()
+        try:
             task.returncode = task.process.wait()
+        except Exception as exc:
+            print(f"wait error: {exc}", flush=True)
+        try:
             final = self.provider.finalize(task)
             if final is not None:
                 if final.session_id:
@@ -667,22 +724,19 @@ class Bridge:
                     or task.assistant_messages[-1] != final.assistant_text
                 ):
                     task.assistant_messages.append(final.assistant_text)
-            task.done = True
-            if not task.result_sent:
-                self.send(task.chat_id, self._finish_message(task))
-                task.result_sent = True
         except Exception as exc:
-            task.done = True
-            task.last_error = str(exc)
-            self.send(task.chat_id, f"Bridge error while running {self.display}: {exc}")
-        finally:
-            self.store.save_bridge_state(self.bridge_snapshot())
+            print(f"finalize error: {exc}", flush=True)
+        task.done = True
+        if not task.stopped:
+            self._notify_exit(task)
+        self.store.save_bridge_state(self.bridge_snapshot())
+        self._run_pending()
 
     def _consume_line(self, task: TaskState, line: str) -> None:
         ev = self.provider.consume_line(line)
         if ev is None:
             return
-        if ev.session_id:
+        if ev.session_id and ev.session_id != task.session_id:
             task.session_id = ev.session_id
             self.set_anchor(task.chat_id, ev.session_id)
         if ev.clear_anchor:
@@ -692,9 +746,72 @@ class Bridge:
                 task.assistant_messages.append(ev.assistant_text)
         if ev.is_result:
             task.result_received = True
-            if not task.result_sent:
-                self.send(task.chat_id, self._result_message(task, ev))
-                task.result_sent = True
+            task.result_count += 1
+            first = task.result_count == 1
+            task.waiting_background = False
+            if not task.stopped:
+                self.safe_send(task.chat_id, self._result_message(task, ev, first))
+            task.result_sent = True
+            self._check_background(task, task.result_count)
+
+    def _unsent_body(self, task: TaskState) -> str:
+        new = task.assistant_messages[task.sent_count:]
+        task.sent_count = len(task.assistant_messages)
+        return "\n\n".join(new[-3:]).strip()
+
+    def _check_background(self, task: TaskState, at_result: int, delay: float = 5.0) -> None:
+        """result 뒤에도 프로세스가 살아 있으면 백그라운드 작업이 남은 것이다."""
+        def fire() -> None:
+            if task.done or task.stopped or task.result_count != at_result:
+                return
+            if task.process.poll() is not None:
+                return
+            task.waiting_background = True
+            self.safe_send(
+                task.chat_id,
+                f"⏳ 응답은 왔지만 {self.display}가 백그라운드 작업을 기다리는 중입니다. "
+                "끝나면 결과를 이어서 보냅니다.\n"
+                "그 사이 보내는 메시지는 대기열에 넣었다가 이어서 실행합니다. (/status, /stop)",
+            )
+        timer = threading.Timer(delay, fire)
+        timer.daemon = True
+        timer.start()
+
+    def _notify_exit(self, task: TaskState) -> None:
+        if task.result_count == 0:
+            # result 이벤트가 없는 프로바이더(agy 등)이거나 비정상 종료
+            self.safe_send(task.chat_id, self._finish_message(task))
+            task.sent_count = len(task.assistant_messages)
+            return
+        body = self._unsent_body(task)
+        if body:
+            self.safe_send(task.chat_id, f"{self.display} 이어진 결과 ({task.duration()}s)\n\n{body}")
+        if task.returncode:
+            tail = "\n".join(list(task.tail)[-20:]).strip()
+            msg = f"{self.display} 프로세스가 exit code {task.returncode} 로 끝났습니다."
+            if task.last_error:
+                msg += f"\n오류: {task.last_error}"
+            if tail:
+                msg += f"\n\nRecent output:\n{tail}"
+            self.safe_send(task.chat_id, msg)
+        elif task.waiting_background:
+            self.safe_send(task.chat_id, f"✅ 백그라운드 작업까지 끝났습니다. ({task.duration()}s)")
+
+    def _run_pending(self) -> None:
+        """대기열을 채팅별로 묶어 한 번에 실행한다(같은 세션 이어서)."""
+        with self.task_lock:
+            if not self.pending:
+                return
+            chat_id = self.pending[0][0]
+            prompts = [p for c, p in self.pending if c == chat_id]
+            self.pending = [(c, p) for c, p in self.pending if c != chat_id]
+        prompt = prompts[0] if len(prompts) == 1 else "\n\n".join(
+            f"[대기 중 받은 메시지 {i}] {p}" for i, p in enumerate(prompts, 1))
+        try:
+            self.start_task(chat_id, prompt)
+        except Exception as exc:
+            print(f"pending start failed: {exc}", flush=True)
+            self.safe_send(chat_id, f"대기열 실행 실패: {exc}")
 
     def _finish_message(self, task: TaskState) -> str:
         header = f"{self.display} task finished with exit code {task.returncode} in {task.duration()}s"
@@ -707,12 +824,14 @@ class Bridge:
             message += f"\n\nRecent output:\n{tail}"
         return message
 
-    def _result_message(self, task: TaskState, ev) -> str:
+    def _result_message(self, task: TaskState, ev, first: bool = True) -> str:
         status = "error" if ev.is_error else (ev.result_subtype or "result")
-        body = "\n\n".join(task.assistant_messages[-3:]).strip()
+        body = self._unsent_body(task)
         if not body:
             body = "(No assistant message captured. Use /tail for raw output.)"
-        return f"{self.display} task {status} in {task.duration()}s\n\n{body}"
+        if first:
+            return f"{self.display} task {status} in {task.duration()}s\n\n{body}"
+        return f"{self.display} 백그라운드 작업 후 이어진 결과 ({status}, {task.duration()}s)\n\n{body}"
 
     def status_text(self, chat_id: str) -> str:
         task = self.task
@@ -722,8 +841,15 @@ class Bridge:
                 f"Current workdir: {self.current_workdir}\n"
                 f"{self.format_anchor_text(chat_id)}"
             )
-        state = "running" if not task.done else "finished"
+        if task.done:
+            state = "finished"
+        elif task.waiting_background:
+            state = "background (응답 후 백그라운드 작업 대기 중)"
+        else:
+            state = "running"
         session_line = f"\nSession: {task.session_id}" if task.session_id else ""
+        queued = sum(1 for c, _ in self.pending if c == chat_id)
+        queue_line = f"\nQueued messages: {queued}" if queued else ""
         return (
             f"Task state: {state}\n"
             f"Workdir: {task.workdir}\n"
@@ -731,7 +857,7 @@ class Bridge:
             f"Anchored session: {self.current_anchor(chat_id) or '-'}\n"
             f"Duration: {task.duration()}s\n"
             f"Exit code: {task.returncode}\n"
-            f"Prompt: {task.prompt[:280]}{session_line}"
+            f"Prompt: {task.prompt[:280]}{session_line}{queue_line}"
         )
 
     def tail_text(self) -> str:
@@ -746,8 +872,12 @@ class Bridge:
     def stop_task(self, chat_id: str) -> None:
         with self.task_lock:
             task = self.task
+            dropped = sum(1 for c, _ in self.pending if c == chat_id)
+            self.pending = [(c, p) for c, p in self.pending if c != chat_id]
             if task is None or task.done:
-                self.send(chat_id, "No running task to stop."); return
+                extra = f" (대기열 {dropped}건 비움)" if dropped else ""
+                self.send(chat_id, f"No running task to stop.{extra}"); return
+            task.stopped = True
             task.process.terminate()
             try:
                 task.process.wait(timeout=10)
@@ -757,7 +887,8 @@ class Bridge:
             task.done = True
             task.returncode = task.process.returncode
             self.store.save_bridge_state(self.bridge_snapshot())
-        self.send(chat_id, f"Stopped {self.display} task. Exit code: {task.returncode}")
+        extra = f"\n대기열 {dropped}건도 비웠습니다." if dropped else ""
+        self.send(chat_id, f"Stopped {self.display} task. Exit code: {task.returncode}{extra}")
 
     def run_forever(self) -> None:
         offset = self.store.load_offset()
